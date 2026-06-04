@@ -19,7 +19,7 @@ ensureWorker(): Promise<void>
 ## What it does
 
 - **If the worker is already running**, returns the existing ready `Promise` immediately — there is no extra spawn attempt and no race condition.
-- **If no worker is running**, spawns `python3 worker.py` (or `$ESEM_PYTHON worker.py` if the environment variable is set) as a child process with `stdio` fully piped. The worker's current working directory is set to `process.cwd()` so that relative module imports resolve correctly.
+- **If no worker is running**, spawns the bundled `worker.py` script using `python3` (or the binary specified by `$ESEM_PYTHON`) as a child process with `stdio` fully piped. The worker's current working directory is set to `process.cwd()` so that relative module imports resolve correctly.
 - **Resolves when the worker sends `{"type": "ready"}`** on its stdout, signalling that it has finished initialising and is ready to process requests.
 
 ## Pre-warming the worker

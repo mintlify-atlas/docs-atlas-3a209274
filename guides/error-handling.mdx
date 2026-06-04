@@ -1,7 +1,7 @@
 ---
-title: "Handling Python Errors in JavaScript"
+title: "Handling Python Errors and Exceptions in JavaScript"
 sidebarTitle: "Error Handling"
-description: "Python exceptions raised during a bridge call reject the awaited Promise with a PythonError. Inspect the error type, message, and full traceback from JavaScript."
+description: "Python exceptions raised during a bridge call reject the awaited Promise with a PythonError. Inspect the error type, message, and full traceback."
 ---
 
 Any unhandled exception raised by Python during a bridge call is caught by the worker, serialized with its type, message, and full traceback, and sent back over the JSON-RPC channel. On the JavaScript side, the pending `Promise` is rejected with a `PythonError` instance — a subclass of the native `Error` class — giving you structured access to everything Python reported.

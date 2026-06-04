@@ -37,14 +37,20 @@ A `Promise` that resolves to a proxy object representing the loaded Python modul
 <CodeGroup>
 
 ```js File path
+import { python } from "esem-bridge";
+
 const tools = await python("./tools.py");
 ```
 
 ```js Pip package
+import { python } from "esem-bridge";
+
 const np = await python("numpy");
 ```
 
 ```js Destructuring
+import { python } from "esem-bridge";
+
 const { add, greet } = await python("./tools.py");
 ```
 
@@ -53,6 +59,8 @@ const { add, greet } = await python("./tools.py");
 ### Calling a function
 
 ```js
+import { python } from "esem-bridge";
+
 const { add } = await python("./tools.py");
 const result = await add(2, 3); // 5
 ```
@@ -60,6 +68,8 @@ const result = await add(2, 3); // 5
 ### Instantiating a class
 
 ```js
+import { python } from "esem-bridge";
+
 const { Calculator } = await python("./calculator.py");
 const calc = await Calculator(2);
 const result = await calc.add(1.234, 2.345);
@@ -70,6 +80,8 @@ const result = await calc.add(1.234, 2.345);
 ### Reading a constant
 
 ```js
+import { python } from "esem-bridge";
+
 const config = await python("./config.py");
 const version = await config.VERSION;
 ```

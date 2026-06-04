@@ -1,7 +1,7 @@
 ---
-title: "Python–JavaScript Type Mappings in esem-bridge"
+title: "Python–JavaScript Type Mappings in esem-bridge Bridge"
 sidebarTitle: "Type Mappings"
-description: "How Python types serialize to JavaScript and back. Covers primitives, lists, dicts, None, booleans, and class instance proxies."
+description: "How Python types serialize to JavaScript and back in esem-bridge. Covers primitives, lists, dicts, None, booleans, and class instance proxies."
 ---
 
 esem-bridge uses a typed wire format to carry values between the Python worker and the Node.js runtime. Every value on the wire is a JSON object with a `type` field and a `value` field (or a `ref_id` for proxied objects). This format lets the bridge distinguish between types that JSON would otherwise collapse — for example, `int` versus `float`, or `bool` versus `int` in Python. Serialization happens in `proxy.js` (JS→Python) and `worker.py` (Python→JS), and the two sides mirror each other exactly.

@@ -1,7 +1,7 @@
 ---
-title: "PythonError — Bridged Python Exception Class"
+title: "PythonError — Python Exception Bridged to JavaScript"
 sidebarTitle: "PythonError"
-description: "PythonError extends Error and is thrown when a Python exception crosses the bridge. Inspect err.message, err.name, err.pythonTraceback, and err.isPythonError."
+description: "PythonError extends Error and is thrown when a Python exception crosses the bridge. Inspect message, name, pythonTraceback, and isPythonError."
 ---
 
 Any unhandled exception raised inside Python causes the corresponding awaited `Promise` to reject with a `PythonError`. The error carries the original exception message, the Python exception class name, and the full formatted traceback — everything you need to diagnose what went wrong on the Python side without switching runtimes.
@@ -87,7 +87,7 @@ def fail():
 
 If the Python worker process exits unexpectedly — for example because it was killed by the OS or crashed due to an unrecoverable error — all pending `Promise`s reject with a plain `Error`, not a `PythonError`:
 
-```
+```text
 Error: Python worker exited unexpectedly
 ```
 

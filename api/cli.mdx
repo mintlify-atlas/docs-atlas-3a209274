@@ -4,7 +4,7 @@ sidebarTitle: "CLI"
 description: "The esem command-line tool runs Node.js scripts with the python: import loader enabled. Use esem run <file.js> instead of node <file.js>."
 ---
 
-The `esem` CLI is a thin wrapper around `node` that automatically injects the `--experimental-loader esem-bridge/loader` flag before your script. This means any JavaScript file that uses `python:` import syntax runs without any manual Node.js flag configuration — you replace `node index.js` with `esem run index.js` and the bridge is ready.
+The `esem` CLI is a thin wrapper around `node` that automatically injects the `--experimental-loader` flag pointing at the bundled `loader.js` before your script. This means any JavaScript file that uses `python:` import syntax runs without any manual Node.js flag configuration — you replace `node index.js` with `esem run index.js` and the bridge is ready.
 
 ## Installation
 
