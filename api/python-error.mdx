@@ -1,0 +1,108 @@
+---
+title: "PythonError — Bridged Python Exception Class"
+sidebarTitle: "PythonError"
+description: "PythonError extends Error and is thrown when a Python exception crosses the bridge. Inspect err.message, err.name, err.pythonTraceback, and err.isPythonError."
+---
+
+Any unhandled exception raised inside Python causes the corresponding awaited `Promise` to reject with a `PythonError`. The error carries the original exception message, the Python exception class name, and the full formatted traceback — everything you need to diagnose what went wrong on the Python side without switching runtimes.
+
+## Class definition
+
+```ts
+class PythonError extends Error {
+  name: string;            // e.g. "PythonError(ValueError)"
+  message: string;         // the exception message
+  pythonTraceback: string; // full Python traceback
+  isPythonError: true;     // always true
+}
+```
+
+## Properties
+
+<ResponseField name="message" type="string">
+  The Python exception message — the string argument passed to the exception constructor (e.g. `"Input cannot be empty"`).
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  A formatted string identifying the Python exception type: `"PythonError(ErrorType)"`, where `ErrorType` is the unqualified Python exception class name. Examples: `"PythonError(ValueError)"`, `"PythonError(TypeError)"`, `"PythonError(KeyError)"`. If the type cannot be determined, the value is `"PythonError"`.
+</ResponseField>
+
+<ResponseField name="pythonTraceback" type="string">
+  The full formatted Python traceback as a single string, identical to what Python prints to stderr. Useful for pinpointing the exact file, line number, and call stack where the exception originated.
+</ResponseField>
+
+<ResponseField name="isPythonError" type="boolean">
+  Always `true`. Provides a reliable, duck-typed way to distinguish `PythonError` instances from other errors in catch blocks without importing the class — e.g. `if (err.isPythonError)`.
+</ResponseField>
+
+## Catching a PythonError
+
+```js
+import { python, PythonError } from "esem-bridge";
+
+const { parse_data } = await python("./tools.py");
+try {
+  await parse_data(null);
+} catch (err) {
+  if (err instanceof PythonError) {
+    console.log(err.message);         // "Input cannot be empty"
+    console.log(err.name);            // "PythonError(ValueError)"
+    console.log(err.pythonTraceback); // full traceback
+  }
+}
+```
+
+## Test verification
+
+The following test from the esem-bridge test suite verifies that Python error details are preserved faithfully across the bridge:
+
+```js
+test("preserves Python error details", async (t) => {
+  t.after(shutdown);
+
+  const { fail } = await python("./test/fixture.py");
+
+  await assert.rejects(fail(), (error) => {
+    assert.ok(error instanceof PythonError);
+    assert.equal(error.name, "PythonError(ValueError)");
+    assert.match(error.message, /example failure/);
+    assert.match(error.pythonTraceback, /ValueError: example failure/);
+    return true;
+  });
+});
+```
+
+The fixture Python function that triggers this error is:
+
+```python
+def fail():
+    raise ValueError("example failure")
+```
+
+<Note>
+  `PythonError` extends the native `Error` class, so it works with every standard JavaScript error-handling pattern: `try/catch`, `Promise.catch()`, `assert.rejects()`, `instanceof` checks, and error-monitoring libraries that inspect the `Error` prototype chain.
+</Note>
+
+## Worker crash errors
+
+If the Python worker process exits unexpectedly — for example because it was killed by the OS or crashed due to an unrecoverable error — all pending `Promise`s reject with a plain `Error`, not a `PythonError`:
+
+```
+Error: Python worker exited unexpectedly
+```
+
+This plain `Error` will not satisfy `err instanceof PythonError` or `err.isPythonError`. Guard against it by checking `err.isPythonError` (or `instanceof PythonError`) before accessing `pythonTraceback`:
+
+```js
+try {
+  await someProxiedFunction();
+} catch (err) {
+  if (err instanceof PythonError) {
+    // Python raised an exception — inspect traceback
+    console.error(err.pythonTraceback);
+  } else {
+    // Worker crashed or some other JS-side error
+    console.error("Unexpected error:", err.message);
+  }
+}
+```

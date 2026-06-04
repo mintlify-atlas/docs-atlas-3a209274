@@ -1,0 +1,117 @@
+---
+title: "Handling Python Errors in JavaScript"
+sidebarTitle: "Error Handling"
+description: "Python exceptions raised during a bridge call reject the awaited Promise with a PythonError. Inspect the error type, message, and full traceback from JavaScript."
+---
+
+Any unhandled exception raised by Python during a bridge call is caught by the worker, serialized with its type, message, and full traceback, and sent back over the JSON-RPC channel. On the JavaScript side, the pending `Promise` is rejected with a `PythonError` instance — a subclass of the native `Error` class — giving you structured access to everything Python reported.
+
+## The `PythonError` class
+
+`PythonError` extends the built-in JavaScript `Error`. It carries three extra properties in addition to the standard `message`:
+
+| Property            | Type      | Description                                                                 |
+|---------------------|-----------|-----------------------------------------------------------------------------|
+| `err.message`       | `string`  | The Python exception message, e.g. `"Input cannot be empty"`               |
+| `err.name`          | `string`  | `"PythonError(ErrorType)"`, e.g. `"PythonError(ValueError)"`               |
+| `err.pythonTraceback` | `string` | The full Python traceback as a multi-line string                            |
+| `err.isPythonError` | `boolean` | Always `true` — useful for duck-typing without an `instanceof` check        |
+
+## Example: catching a Python exception
+
+Define a Python function that raises:
+
+```python
+# tools.py
+def parse_data(raw):
+    if not raw:
+        raise ValueError("Input cannot be empty")
+    return process(raw)
+```
+
+Catch the resulting `PythonError` in JavaScript:
+
+```js
+import { python, PythonError } from "esem-bridge";
+
+const { parse_data } = await python("./tools.py");
+
+try {
+  await parse_data(null);
+} catch (err) {
+  if (err instanceof PythonError) {
+    console.log(err.message);          // "Input cannot be empty"
+    console.log(err.name);             // "PythonError(ValueError)"
+    console.log(err.pythonTraceback);  // full Python traceback string
+  }
+}
+```
+
+## Verified by the test suite
+
+The following test from `test/api.test.js` confirms that all three properties are populated correctly when a Python exception crosses the bridge:
+
+```js
+test("preserves Python error details", async (t) => {
+  t.after(shutdown);
+
+  const { fail } = await python("./test/fixture.py");
+
+  await assert.rejects(fail(), (error) => {
+    assert.ok(error instanceof PythonError);
+    assert.equal(error.name, "PythonError(ValueError)");
+    assert.match(error.message, /example failure/);
+    assert.match(error.pythonTraceback, /ValueError: example failure/);
+    return true;
+  });
+});
+```
+
+The fixture function that triggers this test is:
+
+```python
+# test/fixture.py
+def fail():
+    raise ValueError("example failure")
+```
+
+## `PythonError` extends native `Error`
+
+<Note>
+  `PythonError` is a proper subclass of the JavaScript `Error` class. It works naturally with any standard error-handling pattern: `try/catch`, Promise `.catch()`, `assert.rejects()`, logging libraries, and error-monitoring services. Stack traces and `instanceof` checks all behave as expected.
+</Note>
+
+## Narrowing Python errors from JS errors
+
+<Tip>
+  Use `err instanceof PythonError` to distinguish between an exception raised by Python and a JavaScript runtime error (e.g. a `TypeError` from your own code). This lets you handle each case separately without accidentally swallowing unrelated JS bugs.
+
+  ```js
+  try {
+    await parse_data(null);
+  } catch (err) {
+    if (err instanceof PythonError) {
+      // Python raised an exception — report it to your error tracker
+    } else {
+      // Something went wrong in JS — re-throw or handle differently
+      throw err;
+    }
+  }
+  ```
+</Tip>
+
+## Worker crash
+
+If the Python worker process exits with a non-zero exit code — due to a segfault, an unhandled top-level exception, or an external `SIGKILL` — the bridge cannot send a structured error response. In that case, every `Promise` that was waiting for a response from the worker is rejected with a plain JavaScript `Error`:
+
+```
+Error: Python worker exited unexpectedly
+```
+
+The bridge logs the exit code to stderr before rejecting the pending requests:
+
+```
+[esem] Python worker exited with code 1
+```
+
+After a worker crash the bridge resets its internal state. A subsequent call to `python()` will spawn a fresh worker automatically.

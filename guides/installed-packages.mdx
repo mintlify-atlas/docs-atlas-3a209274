@@ -1,0 +1,56 @@
+---
+title: "Using Installed Python Packages with esem-bridge"
+sidebarTitle: "Packages"
+description: "Import pip-installed packages like numpy or pandas through the bridge using their package name instead of a file path. Set ESEM_PYTHON to use a virtualenv."
+---
+
+The `python()` helper accepts either a file path to a local `.py` file or the name of a pip-installed package. When you pass a package name, the worker calls `importlib.import_module()` internally — the same mechanism Python itself uses for all standard imports. This means any package that works in a regular Python script will work through the bridge.
+
+## Importing an installed package
+
+Pass the package name as a string instead of a file path:
+
+```js
+import { python } from "esem-bridge";
+
+const np = await python("numpy");
+```
+
+<Note>
+  The package must already be installed in the Python interpreter that esem-bridge is using. If it is not installed, Python will raise a `ModuleNotFoundError` which crosses the bridge as a `PythonError`.
+</Note>
+
+## Using a virtualenv
+
+By default the bridge spawns `python3` from your system `PATH`. Set the `ESEM_PYTHON` environment variable to point to any Python binary — including one inside a virtual environment — and the bridge will use that interpreter instead:
+
+```bash
+python -m venv .venv
+.venv/bin/pip install numpy scikit-learn
+ESEM_PYTHON=.venv/bin/python node index.js
+```
+
+## Using a conda environment
+
+The same `ESEM_PYTHON` variable works for conda environments:
+
+```bash
+ESEM_PYTHON=/opt/conda/envs/myenv/bin/python node index.js
+```
+
+## How module loading works
+
+The Python worker decides how to load a module spec based on simple path detection:
+
+- If the spec starts with `./` or `/`, or ends with `.py` → loaded as a file path using `importlib.util.spec_from_file_location`
+- Otherwise → loaded as an installed package using `importlib.import_module()`
+
+This means `"./tools.py"`, `"/abs/path/tools.py"`, and `"tools.py"` are all treated as file paths, while `"numpy"`, `"sklearn"`, and `"pandas"` are treated as package names.
+
+<Tip>
+  Set `ESEM_PYTHON` in a `.env` file or in your deployment environment's configuration (e.g. Vercel environment variables, a Docker `ENV` instruction, or a systemd service file). This way you never need to prefix individual `node` commands, and the correct interpreter is always used regardless of how the process is started.
+</Tip>
+
+<Warning>
+  Packages with C extensions or native compiled code — such as `numpy`, `pandas`, `scikit-learn`, or `cryptography` — work fine through the bridge. However, the package must be installed for the exact Python interpreter pointed to by `ESEM_PYTHON`. A package installed in one virtualenv is not visible to another interpreter, and a package installed for `python3.11` may not be visible to `python3.12`.
+</Warning>

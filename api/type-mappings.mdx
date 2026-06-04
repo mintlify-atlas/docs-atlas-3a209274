@@ -1,0 +1,100 @@
+---
+title: "Python–JavaScript Type Mappings in esem-bridge"
+sidebarTitle: "Type Mappings"
+description: "How Python types serialize to JavaScript and back. Covers primitives, lists, dicts, None, booleans, and class instance proxies."
+---
+
+esem-bridge uses a typed wire format to carry values between the Python worker and the Node.js runtime. Every value on the wire is a JSON object with a `type` field and a `value` field (or a `ref_id` for proxied objects). This format lets the bridge distinguish between types that JSON would otherwise collapse — for example, `int` versus `float`, or `bool` versus `int` in Python. Serialization happens in `proxy.js` (JS→Python) and `worker.py` (Python→JS), and the two sides mirror each other exactly.
+
+## Python → JavaScript
+
+When Python returns a value, `worker.py`'s `_serialize()` function converts it to the wire format. The Node.js side then deserializes it in `proxy.js`'s `deserialize()` function.
+
+| Python | Wire `type` | JavaScript |
+|---|---|---|
+| `None` | `"null"` | `null` |
+| `bool` | `"bool"` | `boolean` |
+| `int` | `"int"` | `number` |
+| `float` | `"float"` | `number` |
+| `str` | `"str"` | `string` |
+| `list` | `"list"` | `Array` |
+| `tuple` | `"list"` | `Array` |
+| `dict` | `"dict"` | plain `object` |
+| callable / class | `"proxy"` | proxy function |
+| class instance | `"proxy"` | proxy object |
+
+<Note>
+  Python `tuple` is serialized using the same `"list"` wire type as `list`.
+  Tuples and lists are therefore indistinguishable on the JavaScript side — both
+  arrive as plain JavaScript `Array` values.
+</Note>
+
+## JavaScript → Python
+
+When JavaScript passes arguments to a Python function, `proxy.js`'s `serialize()` function converts each value to the wire format. Python's `_deserialize()` reconstructs the original types.
+
+| JavaScript | Wire `type` | Python |
+|---|---|---|
+| `null` / `undefined` | `"null"` | `None` |
+| `boolean` | `"bool"` | `bool` |
+| integer `number` | `"int"` | `int` |
+| float `number` | `"float"` | `float` |
+| `string` | `"str"` | `str` |
+| `Array` | `"list"` | `list` |
+| plain `object` | `"dict"` | `dict` |
+| proxy object (has `__esem_ref_id`) | `"proxy"` | original Python object |
+
+Integer detection in `proxy.js` uses `Number.isInteger(value)` — a JavaScript number is serialized as `"int"` if it has no fractional part, and `"float"` otherwise.
+
+## Wire Format
+
+Values are always wrapped in an envelope object. Nested structures are recursively wrapped — each element of a list and each value in a dict is itself a typed envelope.
+
+A nested dict value as it travels over the wire:
+
+```json
+{
+  "type": "dict",
+  "value": {
+    "debug": { "type": "bool", "value": true },
+    "ports": {
+      "type": "list",
+      "value": [
+        { "type": "int", "value": 3000 },
+        { "type": "int", "value": 3001 }
+      ]
+    }
+  }
+}
+```
+
+On the JavaScript side this deserializes to `{ debug: true, ports: [3000, 3001] }` — a plain object with no type annotations.
+
+## Proxy Round-Tripping
+
+When Python returns a class instance (or any callable), the worker registers the object in its internal `_object_registry` under a generated `ref_id` such as `"py_obj_1"` and sends a proxy envelope instead of the object's data:
+
+```json
+{ "type": "proxy", "ref_id": "py_obj_1" }
+```
+
+The JavaScript side creates a proxy object with the `__esem_ref_id` property set to that ref ID, and with async methods wired up for each entry in the `methods` map returned by the `construct` action.
+
+If you later pass that proxy object back to Python as an argument, `proxy.js` detects the `__esem_ref_id` property and serializes it as:
+
+```json
+{ "type": "proxy", "ref_id": "py_obj_1" }
+```
+
+Python's `_deserialize()` then calls `_get_object("py_obj_1")` and retrieves the original Python object from the registry. The object is round-tripped through JavaScript without ever being converted to a plain data structure.
+
+<Warning>
+  Python types that are neither primitives nor dicts/lists — such as `set`,
+  generator objects, file handles, sockets, or other non-serializable values —
+  are automatically registered as proxies. You can call methods on them from
+  JavaScript, but you cannot inspect their content directly. There is no
+  JavaScript equivalent for a Python `set`, so attempting to use a proxy where
+  a plain value is expected will not work as you might hope. Convert such values
+  to `list` or `dict` in Python before returning them if you need to inspect
+  them in JavaScript.
+</Warning>

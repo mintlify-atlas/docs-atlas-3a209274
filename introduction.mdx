@@ -1,0 +1,89 @@
+---
+title: "esem-bridge: Call Python from JavaScript Directly"
+sidebarTitle: "Introduction"
+description: "esem-bridge is a zero-server runtime bridge that lets Node.js import Python modules and call functions, classes, and constants as native async JavaScript."
+---
+
+esem-bridge eliminates the glue layer that teams typically build when combining Python and JavaScript. Instead of wrapping Python logic in a FastAPI or Flask server, writing HTTP endpoints, serializing data manually, and running two separate processes, you import a Python module directly in Node.js and call its functions as if they were native async JavaScript. No network stack, no deployment overhead, no cold-start per call.
+
+## The traditional approach vs. esem-bridge
+
+Without esem-bridge, bridging Python and JavaScript means standing up a whole HTTP layer just to invoke a function:
+
+```python
+# server.py — the glue you'd rather not write
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.post("/predict")
+def predict(user: dict):
+    return { "score": 87, "risk": "low" }
+```
+
+```js
+// client.js — HTTP round-trip for a local function call
+const res = await fetch("http://localhost:8000/predict", {
+  method: "POST",
+  body: JSON.stringify({ age: 22, country: "NG" }),
+});
+const result = await res.json();
+```
+
+With esem-bridge, the same logic collapses to a direct import and call:
+
+```python
+# model.py
+def predict_score(user):
+    # your ML logic here
+    return { "score": 87, "risk": "low" }
+```
+
+```js
+import { python } from "esem-bridge";
+
+const { predict_score } = await python("./model.py");
+const result = await predict_score({ age: 22, country: "NG" });
+console.log(result); // { score: 87, risk: "low" }
+```
+
+No FastAPI. No Express endpoint. No subprocess boilerplate. No JSON over HTTP. Just import and call.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Two import styles" icon="code">
+    Use the `python()` helper for dynamic imports or the `python:` prefix with ESM `import` syntax — whichever fits your codebase.
+  </Card>
+  <Card title="Full type bridge" icon="arrow-right-arrow-left">
+    Python `None`, `bool`, `int`, `float`, `str`, `list`, and `dict` map directly to their JavaScript equivalents. Class instances cross as live proxy objects.
+  </Card>
+  <Card title="Python exceptions cross the bridge" icon="triangle-exclamation">
+    Any exception raised in Python arrives in JavaScript as a `PythonError` carrying the original message, exception type, and full traceback.
+  </Card>
+  <Card title="Single persistent worker, no network" icon="bolt">
+    One Python subprocess is spawned on the first `python()` call and reused for the lifetime of your Node.js process. Communication is newline-delimited JSON-RPC over stdin/stdout — no TCP, no HTTP.
+  </Card>
+  <Card title="Virtualenv support via ESEM_PYTHON" icon="python">
+    Set the `ESEM_PYTHON` environment variable to any Python binary — including one inside a `.venv` — to use your project's exact Python environment.
+  </Card>
+  <Card title="Auto-shutdown when Node exits" icon="power-off">
+    When no Python calls are in flight, the worker is automatically unreffed so Node.js can exit naturally. Process signals (`SIGINT`, `SIGTERM`) and the `exit` event shut the worker down cleanly.
+  </Card>
+</CardGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install esem-bridge and make your first Python call from JavaScript in under two minutes.
+  </Card>
+  <Card title="How It Works" icon="gears" href="/how-it-works">
+    Explore the JSON-RPC wire protocol, the proxy system, and the worker lifecycle in detail.
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/python">
+    Full reference for `python()`, `shutdown()`, `PythonError`, and all exported utilities.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/api/cli">
+    Reference for the `esem run` command and the `--experimental-loader` flag.
+  </Card>
+</CardGroup>

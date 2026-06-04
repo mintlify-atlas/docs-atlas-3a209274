@@ -1,0 +1,44 @@
+---
+title: "ensureWorker() — Guarantee the Python Worker Is Running"
+sidebarTitle: "ensureWorker()"
+description: "Low-level function that spawns the Python worker subprocess if it is not already running, and resolves when the worker signals readiness."
+---
+
+`ensureWorker()` is a lower-level utility that guarantees the Python worker subprocess is running and ready to accept requests. [`python()`](/api/python) calls it automatically before returning any module proxy, so most application code never needs to call it directly. The main use-case for calling it explicitly is **pre-warming** — starting the worker at server startup so the first `python()` call has no cold-start latency.
+
+## Signature
+
+```ts
+ensureWorker(): Promise<void>
+```
+
+## Parameters
+
+`ensureWorker()` takes no parameters.
+
+## What it does
+
+- **If the worker is already running**, returns the existing ready `Promise` immediately — there is no extra spawn attempt and no race condition.
+- **If no worker is running**, spawns `python3 worker.py` (or `$ESEM_PYTHON worker.py` if the environment variable is set) as a child process with `stdio` fully piped. The worker's current working directory is set to `process.cwd()` so that relative module imports resolve correctly.
+- **Resolves when the worker sends `{"type": "ready"}`** on its stdout, signalling that it has finished initialising and is ready to process requests.
+
+## Pre-warming the worker
+
+The most common reason to call `ensureWorker()` directly is to eliminate the cold-start delay that would otherwise occur on the first `python()` call:
+
+```js
+import { ensureWorker } from "esem-bridge";
+
+// Pre-warm at server startup
+await ensureWorker();
+
+// Later calls to python() resolve immediately — no spawn overhead
+```
+
+<Note>
+  `python()` calls `ensureWorker()` automatically before returning the module proxy. You never need to call `ensureWorker()` before `python()` — doing so is harmless and simply returns the already-resolved ready promise.
+</Note>
+
+<Tip>
+  In a **Next.js** or **Express** application, call `await ensureWorker()` inside your server startup code (e.g. in `instrumentation.ts` for Next.js, or just before `app.listen()` for Express). This starts the Python worker in the background while the HTTP server initialises, so the very first incoming request that calls `python()` experiences no additional latency.
+</Tip>

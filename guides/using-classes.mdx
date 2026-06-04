@@ -1,0 +1,86 @@
+---
+title: "Using Python Classes and Instances in JavaScript"
+sidebarTitle: "Classes"
+description: "Instantiate Python classes from JavaScript. esem-bridge returns a proxy object with all public instance methods callable as async functions."
+---
+
+When esem-bridge loads a Python module, class constructors are exposed as async factory functions. Calling one sends a `construct` RPC to the Python worker, which instantiates the real Python object and registers it in an in-process object registry. Back on the JavaScript side you receive a lightweight proxy bound to that live Python instance — every public method on the instance becomes an async JS function you can call directly.
+
+## Defining the Python class
+
+Here is a simple `Calculator` class:
+
+```python
+# calculator.py
+class Calculator:
+    def __init__(self, precision=2):
+        self.precision = precision
+
+    def add(self, a, b):
+        return round(a + b, self.precision)
+```
+
+## Instantiating and calling methods
+
+Destructure the class from the module proxy, then call it — with or without `new` — to get a proxy bound to the Python instance:
+
+```js
+import { python } from "esem-bridge";
+
+const { Calculator } = await python("./calculator.py");
+
+const calc = await Calculator(2);             // precision=2
+const result = await calc.add(1.234, 2.345); // 3.58
+console.log(result);
+```
+
+## Stateful classes
+
+Instance state lives entirely in Python. Multiple JS calls to the same proxy all operate on the same underlying Python object, so state accumulates as you'd expect.
+
+The `Counter` class from the playground demonstrates this:
+
+```python
+# playground/tools.py
+class Counter:
+    def __init__(self, start=0):
+        self.value = start
+
+    def add(self, amount=1):
+        self.value += amount
+        return self.value
+```
+
+```js
+import { python } from "esem-bridge";
+
+const { Counter } = await python("./playground/tools.py");
+
+const counter = await Counter(5);
+console.log(await counter.add(3)); // 8
+console.log(await counter.add(2)); // 10
+```
+
+## How the object proxy works
+
+When you `await` a class call, the bridge receives the instance's `ref_id` (e.g. `"py_obj_1"`) and the full list of public methods discovered at construction time. The JS side builds a proxy object with one async function per method.
+
+If you access a method that was not listed at construction (for example a dynamically added attribute), the `Proxy` intercepts the property lookup and dispatches a `method_call` RPC on the fly — so you are never blocked by a missing method on the JS side.
+
+## Releasing instances
+
+Every Python instance the bridge creates is stored in an in-process registry so the worker can look it up by `ref_id` on each method call. When you are done with an instance, call `release()` to remove it from the registry:
+
+```js
+await counter.release();
+```
+
+<Tip>
+  In long-running applications — servers, background workers, queue processors — always call `release()` when you are finished with an instance. Unreleased objects remain in the Python worker's registry for the entire lifetime of the process, which can grow memory usage over time if you create many short-lived instances.
+</Tip>
+
+## Passing a proxy back to Python
+
+<Note>
+  If you have a JS proxy for a Python object and need to pass it as an argument to another Python function or method, the bridge recognizes it automatically. The serialize step checks for `__esem_ref_id` on the value and sends a `{ type: "proxy", ref_id: "..." }` wire message. Python then looks up the original object from the registry and passes it directly — no re-serialization required.
+</Note>

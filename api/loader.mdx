@@ -1,0 +1,125 @@
+---
+title: "ESM Loader Hook — python: Import Syntax for Node.js"
+sidebarTitle: "Loader Hook"
+description: "The esem-bridge/loader Node.js ESM hook intercepts python: specifiers and synthesizes virtual ES modules backed by the bridge at import time."
+---
+
+The `esem-bridge/loader` module is a Node.js ESM loader hook that uses the `--experimental-loader` API to intercept any import specifier beginning with `python:`. At module resolution time, the hook converts that specifier into a synthetic ES module whose `default` and named `mod` exports are live JavaScript proxies backed by the Python bridge. From the perspective of the rest of your code, the import looks and behaves like any other ES module.
+
+## Enabling the Loader
+
+Pass the loader to Node.js with the `--experimental-loader` flag:
+
+```bash
+node --experimental-loader esem-bridge/loader yourfile.js
+```
+
+Alternatively, use the [`esem` CLI](/api/cli), which applies this flag automatically:
+
+```bash
+npx esem run yourfile.js
+```
+
+## Import Syntax
+
+Once the loader is active, you can import Python modules using the `python:` prefix. Both relative file paths and installed package names are supported:
+
+```js
+// Relative path to a .py file
+import tools from "python:./tools.py";
+
+// Installed Python package
+import numpy from "python:numpy";
+```
+
+The `default` export is the module proxy. You can also import the named `mod` export, which holds the identical proxy:
+
+```js
+import { mod as tools } from "python:./tools.py";
+```
+
+## Loader Hooks
+
+The loader implements two standard Node.js ESM hook functions.
+
+### `resolve(specifier, context, nextResolve)`
+
+Intercepts import specifiers. If the specifier starts with `python:`, the loader strips the prefix, URL-encodes the remaining module path, and returns a synthetic `esem://` URL that short-circuits the normal Node.js module resolver:
+
+```js
+// From loader.js
+export function resolve(specifier, context, nextResolve) {
+  if (specifier.startsWith(PYTHON_PREFIX)) {
+    const moduleSpec = specifier.slice(PYTHON_PREFIX.length);
+    return {
+      shortCircuit: true,
+      url: `esem://${encodeURIComponent(moduleSpec)}`,
+    };
+  }
+  return nextResolve(specifier, context);
+}
+```
+
+Any specifier that does not start with `python:` is passed through to the default resolver unchanged.
+
+### `load(url, context, nextLoad)`
+
+Intercepts URLs that begin with `esem://`. It decodes the module path, then synthesizes an ES module source string on the fly:
+
+```js
+// From loader.js
+export function load(url, context, nextLoad) {
+  if (!url.startsWith("esem://")) {
+    return nextLoad(url, context);
+  }
+
+  const moduleSpec = decodeURIComponent(url.slice("esem://".length));
+
+  const source = `
+import { ensureWorker } from ${JSON.stringify(BRIDGE_URL)};
+import { createModuleProxy } from ${JSON.stringify(PROXY_URL)};
+
+await ensureWorker();
+const __mod = await createModuleProxy(${JSON.stringify(moduleSpec)});
+
+export default __mod;
+export { __mod as mod };
+`;
+
+  return {
+    shortCircuit: true,
+    format: "module",
+    source,
+  };
+}
+```
+
+The synthesized module template looks like this for a concrete import:
+
+```js
+import { ensureWorker } from "<bridge url>";
+import { createModuleProxy } from "<proxy url>";
+
+await ensureWorker();
+const __mod = await createModuleProxy("./tools.py");
+
+export default __mod;
+export { __mod as mod };
+```
+
+`ensureWorker()` starts the Python subprocess if it is not already running. `createModuleProxy()` sends a `load` RPC message to the worker and builds a JavaScript proxy object for each export the Python module exposes.
+
+<Note>
+  The `esem run` CLI uses this exact loader under the hood — it simply passes
+  `--experimental-loader=<path to loader.js>` to the Node.js child process it
+  spawns. There is no difference between using the CLI and enabling the loader
+  flag manually.
+</Note>
+
+<Tip>
+  If you are using a bundler such as Vite, webpack, or esbuild, the
+  `--experimental-loader` approach will not work because bundlers process
+  imports at build time, before Node.js runs. Use the `python()` helper
+  function from `esem-bridge` directly instead — it works at runtime and
+  requires no special tooling configuration.
+</Tip>

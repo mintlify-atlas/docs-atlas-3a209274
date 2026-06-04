@@ -1,0 +1,94 @@
+---
+title: "Calling Python Functions from JavaScript"
+sidebarTitle: "Functions"
+description: "Use the python() helper to import a Python module and call its functions as async JavaScript. Supports positional args, keyword args, and all primitive types."
+---
+
+The `python()` helper loads a Python module and returns a proxy object where every callable is wrapped as an async JavaScript function. You can destructure individual functions from the proxy or use the module object directly — either way, each call is a `Promise` that resolves to the Python return value, fully deserialized into native JavaScript types.
+
+## Basic usage
+
+Import `python` from `esem-bridge`, pass a file path, and call functions as you would any async JS function:
+
+```js
+import { python } from "esem-bridge";
+
+const { add, greet } = await python("./tools.py");
+
+console.log(await add(2, 3));       // 5
+console.log(await greet("Crane")); // "Hello, Crane!"
+```
+
+## Keyword arguments
+
+Python functions that accept keyword arguments can be called by passing a plain JavaScript object as an argument. The bridge serializes it as a Python `dict`, and Python receives it as a positional argument — your Python function can then unpack it or use it directly:
+
+```js
+const { predict_score } = await python("./model.py");
+
+const result = await predict_score({ age: 22, country: "NG" });
+console.log(result); // { score: 87, risk: "low" }
+```
+
+## Using the module proxy directly
+
+You don't have to destructure. You can hold a reference to the module proxy and call functions through it:
+
+```js
+const tools = await python("./tools.py");
+
+const result = await tools.add(4, 5);
+console.log(result); // 9
+```
+
+## `python:` import syntax
+
+As an alternative to the `python()` helper, esem-bridge supports a custom `python:` URL scheme that lets you use standard ES `import` statements:
+
+```js
+import tools from "python:./tools.py";
+
+const result = await tools.add(2, 3);
+```
+
+<Note>
+  The `python:` import syntax requires the esem-bridge loader hook. Run your file with the CLI — `npx esem run yourfile.js` — or pass the loader flag manually: `node --experimental-loader esem-bridge/loader yourfile.js`.
+</Note>
+
+## Always `await` function calls
+
+<Note>
+  Every proxied Python function returns a `Promise`. You must `await` each call — calling without `await` gives you an unresolved `Promise`, not the Python return value.
+</Note>
+
+## Real-world example: Next.js API route
+
+A common pattern is calling Python pricing, ML, or data-processing logic from a Next.js route handler. Because `python()` is async and the worker is reused across requests, this is efficient for server-side use:
+
+```js
+// app/api/price/route.js
+import { python } from "esem-bridge";
+
+export async function POST(req) {
+  const body = await req.json();
+  const { calculatePrice } = await python("./pricing.py");
+  const price = await calculatePrice(body);
+  return Response.json({ price });
+}
+```
+
+## Type mapping
+
+Values are automatically serialized on the way to Python and deserialized on the way back. The table below shows the mapping for all supported primitive types:
+
+| Python type   | JavaScript type |
+|---------------|-----------------|
+| `None`        | `null`          |
+| `bool`        | `boolean`       |
+| `int`         | `number`        |
+| `float`       | `number`        |
+| `str`         | `string`        |
+| `list`        | `Array`         |
+| `tuple`       | `Array`         |
+| `dict`        | `object`        |
+| class instance | proxy object   |

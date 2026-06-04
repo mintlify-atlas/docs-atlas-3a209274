@@ -1,0 +1,349 @@
+---
+title: "JSON-RPC Wire Protocol for esem-bridge"
+sidebarTitle: "RPC Protocol"
+description: "esem-bridge communicates between Node.js and Python via newline-delimited JSON-RPC over the worker subprocess stdin/stdout streams."
+---
+
+esem-bridge communicates between the Node.js runtime and the Python worker using newline-delimited JSON messages over the subprocess's stdin and stdout pipes. Node.js writes a request object followed by a newline character to the worker's stdin; the worker processes it and writes a response object followed by a newline to its stdout. Every request carries a numeric `id`; every response echoes that `id` so the bridge can match it to the correct pending Promise. There is no framing beyond the newline delimiter and no transport layer beyond the two stdio streams.
+
+## Startup Signal
+
+Before accepting any requests, the Python worker emits a single ready message to signal that it has initialised and is ready to process requests:
+
+```json
+{"type": "ready"}
+```
+
+`bridge.js` waits for this message before resolving the `ensureWorker()` promise. Any RPC calls made before the ready signal is received are queued and sent immediately after it arrives.
+
+<Note>
+  The request `id` field is a monotonically incrementing integer managed by
+  `bridge.js`. The counter starts at `0` and is incremented for each outgoing
+  request (`++requestCounter`). Responses are matched to their originating
+  call using a `Map` keyed by `id`. This means requests can be in-flight
+  concurrently — responses do not need to arrive in order.
+</Note>
+
+## Actions
+
+The Python worker's `HANDLERS` dict registers one handler function per action name. The six supported actions are documented below.
+
+<Accordion title="load — Load a module and return its exports">
+  Loads a Python module by file path or package name and returns metadata about
+  all of its public exports. The bridge calls this once per unique module
+  specifier when building a module proxy.
+
+  **Request**
+
+  ```json
+  {"id": 1, "action": "load", "module": "./tools.py"}
+  ```
+
+  <ParamField body="id" type="number" required>
+    Monotonically incrementing request identifier.
+  </ParamField>
+
+  <ParamField body="action" type="string" required>
+    Must be `"load"`.
+  </ParamField>
+
+  <ParamField body="module" type="string" required>
+    Relative file path (e.g. `"./tools.py"`) or installed package name (e.g.
+    `"numpy"`). Paths starting with `./`, `/`, or ending with `.py` are treated
+    as file paths; everything else is passed to `importlib.import_module`.
+  </ParamField>
+
+  **Response**
+
+  ```json
+  {
+    "type": "result",
+    "id": 1,
+    "exports": {
+      "add":     {"kind": "function", "params": ["a", "b"]},
+      "Counter": {"kind": "class",    "params": ["start"]}
+    }
+  }
+  ```
+
+  <ResponseField name="exports" type="object">
+    A map of export name → export metadata. Each entry has a `kind` field
+    (`"function"`, `"class"`, or `"value"`) and, for callables, a `params`
+    array of parameter name strings derived from `inspect.signature`.
+  </ResponseField>
+</Accordion>
+
+<Accordion title="call — Call a module-level function">
+  Calls a named function in a previously loaded (or auto-loaded) module with
+  the provided positional arguments and returns the serialized result.
+
+  **Request**
+
+  ```json
+  {
+    "id": 2,
+    "action": "call",
+    "module": "./tools.py",
+    "function": "add",
+    "args": [
+      {"type": "int", "value": 2},
+      {"type": "int", "value": 3}
+    ]
+  }
+  ```
+
+  <ParamField body="module" type="string" required>
+    Module specifier, same format as `load`.
+  </ParamField>
+
+  <ParamField body="function" type="string" required>
+    Name of the function to call.
+  </ParamField>
+
+  <ParamField body="args" type="array">
+    Positional arguments as typed wire-format envelopes. See
+    [Type Mappings](/api/type-mappings) for the envelope schema.
+  </ParamField>
+
+  <ParamField body="kwargs" type="object">
+    Optional keyword arguments as a map of name → typed envelope.
+  </ParamField>
+
+  **Response**
+
+  ```json
+  {"type": "result", "id": 2, "result": {"type": "int", "value": 5}}
+  ```
+
+  <ResponseField name="result" type="object">
+    The function's return value as a typed wire-format envelope.
+  </ResponseField>
+</Accordion>
+
+<Accordion title="construct — Instantiate a class">
+  Instantiates a named class from a module, registers the resulting object in
+  the Python object registry, and returns the `ref_id` together with the
+  instance's public method signatures.
+
+  **Request**
+
+  ```json
+  {
+    "id": 3,
+    "action": "construct",
+    "module": "./tools.py",
+    "class": "Counter",
+    "args": [{"type": "int", "value": 5}]
+  }
+  ```
+
+  <ParamField body="module" type="string" required>
+    Module specifier.
+  </ParamField>
+
+  <ParamField body="class" type="string" required>
+    Name of the class to instantiate.
+  </ParamField>
+
+  <ParamField body="args" type="array">
+    Constructor arguments as typed wire-format envelopes.
+  </ParamField>
+
+  <ParamField body="kwargs" type="object">
+    Optional keyword constructor arguments.
+  </ParamField>
+
+  **Response**
+
+  ```json
+  {
+    "type": "result",
+    "id": 3,
+    "ref_id": "py_obj_1",
+    "methods": {
+      "add": {"kind": "method", "params": ["amount"]}
+    }
+  }
+  ```
+
+  <ResponseField name="ref_id" type="string">
+    Registry key for the new instance, e.g. `"py_obj_1"`. Pass this in
+    subsequent `method_call` or `release` requests.
+  </ResponseField>
+
+  <ResponseField name="methods" type="object">
+    Map of public method name → `{kind: "method", params: [...]}`. Private
+    methods (names starting with `_`) are excluded.
+  </ResponseField>
+</Accordion>
+
+<Accordion title="method_call — Call a method on a proxied object">
+  Looks up a live Python object in the registry by `ref_id` and calls one of
+  its methods.
+
+  **Request**
+
+  ```json
+  {
+    "id": 4,
+    "action": "method_call",
+    "ref_id": "py_obj_1",
+    "method": "add",
+    "args": [{"type": "int", "value": 3}]
+  }
+  ```
+
+  <ParamField body="ref_id" type="string" required>
+    Registry key returned by a prior `construct` response.
+  </ParamField>
+
+  <ParamField body="method" type="string" required>
+    Name of the method to call.
+  </ParamField>
+
+  <ParamField body="args" type="array">
+    Positional arguments as typed wire-format envelopes.
+  </ParamField>
+
+  <ParamField body="kwargs" type="object">
+    Optional keyword arguments.
+  </ParamField>
+
+  **Response**
+
+  ```json
+  {"type": "result", "id": 4, "result": {"type": "int", "value": 8}}
+  ```
+
+  <ResponseField name="result" type="object">
+    The method's return value as a typed wire-format envelope.
+  </ResponseField>
+</Accordion>
+
+<Accordion title="get_attr — Get an attribute value">
+  Retrieves the value of a named attribute from a module or a proxied object.
+  Module-level constants and other non-callable values are fetched lazily via
+  this action.
+
+  **Request**
+
+  ```json
+  {
+    "id": 5,
+    "action": "get_attr",
+    "module": "./config.py",
+    "attr": "VERSION"
+  }
+  ```
+
+  <ParamField body="module" type="string">
+    Module specifier. Provide either `module` or `ref_id`, not both.
+  </ParamField>
+
+  <ParamField body="ref_id" type="string">
+    Registry key of a proxied object. Provide either `ref_id` or `module`, not
+    both.
+  </ParamField>
+
+  <ParamField body="attr" type="string" required>
+    Name of the attribute to read.
+  </ParamField>
+
+  **Response**
+
+  ```json
+  {"type": "result", "id": 5, "value": {"type": "str", "value": "1.0.0"}}
+  ```
+
+  <ResponseField name="value" type="object">
+    The attribute value as a typed wire-format envelope.
+  </ResponseField>
+</Accordion>
+
+<Accordion title="release — Release a proxied object">
+  Removes a Python object from the registry, allowing it to be garbage-collected.
+  Call this when you are done with a class instance and want to free the memory
+  on the Python side.
+
+  **Request**
+
+  ```json
+  {"id": 6, "action": "release", "ref_id": "py_obj_1"}
+  ```
+
+  <ParamField body="ref_id" type="string" required>
+    Registry key of the object to release.
+  </ParamField>
+
+  **Response**
+
+  ```json
+  {"type": "result", "id": 6}
+  ```
+
+  The response carries no additional fields. After a successful release, any
+  further `method_call` or `get_attr` requests for the same `ref_id` will
+  return an error.
+</Accordion>
+
+## Error Response
+
+When any handler raises an exception, the worker catches it and sends an error response instead of a result. `bridge.js` converts this into a `PythonError` instance and rejects the pending Promise:
+
+```json
+{
+  "type": "error",
+  "id": 2,
+  "error": "Input cannot be empty",
+  "traceback": "Traceback (most recent call last):\n  ...\nValueError: Input cannot be empty\n",
+  "error_type": "ValueError"
+}
+```
+
+<ResponseField name="error" type="string">
+  The string representation of the Python exception (`str(e)`).
+</ResponseField>
+
+<ResponseField name="traceback" type="string">
+  The full Python traceback as produced by `traceback.format_exc()`.
+</ResponseField>
+
+<ResponseField name="error_type" type="string">
+  The Python exception class name, e.g. `"ValueError"`, `"TypeError"`,
+  `"ImportError"`. The resulting `PythonError` in JavaScript will have its
+  `name` property set to `PythonError(<error_type>)`.
+</ResponseField>
+
+## Object Registry
+
+The Python worker maintains a module-level `_object_registry` dictionary that maps `ref_id` strings to live Python objects. The `_object_counter` integer is incremented for each registration, ensuring ref IDs are unique within a worker lifetime.
+
+```python
+# From worker.py
+_object_registry = {}
+_object_counter = 0
+
+def _register_object(obj):
+    global _object_counter
+    _object_counter += 1
+    ref_id = f"py_obj_{_object_counter}"
+    _object_registry[ref_id] = obj
+    return ref_id
+```
+
+Objects are added to the registry in three situations:
+
+1. A class is instantiated via `construct` — the new instance is registered.
+2. A function or method returns a callable or a class object.
+3. A function or method returns any value that is not a primitive, list, or dict.
+
+Objects are removed by the `release` action (`_object_registry.pop(ref_id, None)`). If you never call `release`, objects remain in the registry for the lifetime of the worker process.
+
+<Tip>
+  The JSON-RPC protocol used by esem-bridge is intentionally minimal. It is
+  designed as an in-process IPC mechanism between two local processes on the
+  same machine, not a networked service. There is no authentication, no
+  encryption, no schema validation, and no support for cross-machine transport.
+  The simplicity is a feature — the round-trip overhead for a local function
+  call is measured in microseconds.
+</Tip>

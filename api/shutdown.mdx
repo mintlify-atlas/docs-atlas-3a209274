@@ -1,0 +1,52 @@
+---
+title: "shutdown() — Stop the Python Worker Process"
+sidebarTitle: "shutdown()"
+description: "Synchronously closes the Python worker's stdin and clears all pending requests. Call this in long-running apps when Python calls are no longer needed."
+---
+
+`shutdown()` stops the Python worker process that was spawned by esem-bridge. It closes the worker's stdin (causing the Python process to exit naturally), clears the internal pending-request map, and resets internal state so that a new worker can be spawned the next time [`python()`](/api/python) is called. Call it in long-running applications — servers, daemons, background jobs — once you know Python calls are no longer needed.
+
+## Signature
+
+```ts
+shutdown(): void
+```
+
+## Parameters
+
+`shutdown()` takes no parameters.
+
+## What it does
+
+- **Closes the worker's stdin** — the Python worker reads JSON-RPC messages from stdin; ending that stream causes the worker process to exit cleanly.
+- **Clears the pending-request map** — any request objects waiting for a response are removed from memory. In-flight calls are _not_ actively rejected; call `shutdown()` only after all outstanding `await`s have settled to avoid losing results.
+- **Resets internal state** — `workerProcess` and the ready-promise are reset, so the next `python()` call will spawn a fresh worker transparently.
+
+## Usage
+
+```js
+import { python, shutdown } from "esem-bridge";
+
+const { predict } = await python("./model.py");
+const result = await predict({ age: 22 });
+
+shutdown(); // clean up when done
+```
+
+## Automatic signal registration
+
+esem-bridge registers `shutdown()` on common Node.js process events so that short scripts that simply exit after their last `await` do not need to call it manually:
+
+```js
+process.on("exit", shutdown);
+process.on("SIGINT", () => { shutdown(); process.exit(0); });
+process.on("SIGTERM", () => { shutdown(); process.exit(0); });
+```
+
+<Note>
+  For short scripts that exit immediately after their last `await`, you do not need to call `shutdown()` yourself. esem-bridge hooks into `process.on("exit")` and shuts the worker down automatically when Node.js exits.
+</Note>
+
+<Warning>
+  Calling a proxied Python function _after_ `shutdown()` will trigger a new worker spawn — this is safe, but any work the previous worker had in flight is lost. Always wait for all outstanding `await`s to resolve before calling `shutdown()`.
+</Warning>

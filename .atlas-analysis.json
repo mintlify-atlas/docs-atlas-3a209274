@@ -1,0 +1,95 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "esem-bridge",
+  "projectDescription": "A runtime bridge that lets JavaScript import and call Python modules directly — no REST APIs, servers, or glue code required.",
+  "theme": "luma",
+  "primaryColor": "#5B6CF9",
+  "lightColor": "#EEF0FE",
+  "darkColor": "#3A47D5",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "how-it-works"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/calling-functions",
+              "guides/using-classes",
+              "guides/reading-constants",
+              "guides/error-handling",
+              "guides/installed-packages"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment",
+              "configuration/worker-lifecycle"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "JavaScript API",
+            "pages": [
+              "api/python",
+              "api/shutdown",
+              "api/python-error",
+              "api/ensure-worker"
+            ]
+          },
+          {
+            "group": "CLI",
+            "pages": [
+              "api/cli"
+            ]
+          },
+          {
+            "group": "Internals",
+            "pages": [
+              "api/loader",
+              "api/type-mappings",
+              "api/rpc-protocol"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Import Python modules in JavaScript using python() helper or python: import syntax",
+    "Call Python functions, instantiate classes, and read module constants from JS",
+    "Bidirectional type serialization (None/null, bool, int, float, str, list, dict, class instances)",
+    "Python errors cross the bridge with full traceback and error type information",
+    "Single persistent Python worker process — spawned once, reused across all calls",
+    "JSON-RPC over stdin/stdout — no network, no ports, no servers",
+    "CLI (esem run) for running JS files with python: import syntax enabled",
+    "ESEM_PYTHON env var for custom Python interpreter (virtualenvs, etc.)",
+    "Automatic worker shutdown when Node.js exits"
+  ],
+  "publicApiSurface": [
+    "python(moduleSpec: string): Promise<object>",
+    "shutdown(): void",
+    "PythonError (class, extends Error) — err.message, err.pythonTraceback, err.name",
+    "ensureWorker(): Promise<void>",
+    "esem run <file.js> (CLI)",
+    "esem node <file.js> (CLI alias)",
+    "esem --version (CLI)",
+    "esem --help (CLI)",
+    "python: import syntax (requires loader hook)",
+    "--experimental-loader esem-bridge/loader (Node.js loader hook)",
+    "ESEM_PYTHON environment variable"
+  ]
+}

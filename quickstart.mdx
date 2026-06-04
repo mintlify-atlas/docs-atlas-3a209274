@@ -1,47 +1,141 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with esem-bridge in 2 Minutes"
+sidebarTitle: "Quickstart"
+description: "Install esem-bridge, write a Python module, and call it from Node.js in four steps. No servers or configuration required."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through installing esem-bridge, writing a small Python module, and calling it from a Node.js script. By the end you will have a working bridge between JavaScript and Python with zero server setup. You need **Node.js 18+** and **Python 3.8+** installed on your machine.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+## Using the `python()` helper
 
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+The `python()` helper is the recommended way to load a Python module. It works in any Node.js ESM script with no extra flags.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Install esem-bridge">
+    Add esem-bridge to your project with your preferred package manager.
 
-    ```bash
-    npm install your-package
+    <CodeGroup>
+      ```bash npm
+      npm install esem-bridge
+      ```
+
+      ```bash yarn
+      yarn add esem-bridge
+      ```
+
+      ```bash pnpm
+      pnpm add esem-bridge
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Write a Python module">
+    Create a file called `tools.py` in your project directory. This module exposes a `greet` function, a `multiply` function, and a `Counter` class.
+
+    ```python tools.py
+    def greet(name):
+        return f"Hello, {name}!"
+
+    def multiply(a, b):
+        return a * b
+
+    class Counter:
+        def __init__(self, start=0):
+            self.value = start
+
+        def add(self, amount=1):
+            self.value += amount
+            return self.value
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
+  <Step title="Call it from JavaScript">
+    Create `index.js`. Use `python()` to load the module, then call its exports like regular async functions. Instantiate `Counter` by calling it like a function — `await Counter(5)` returns a live proxy of the Python object.
+
+    ```js index.js
+    import { python, shutdown } from "esem-bridge";
+
+    const { greet, multiply, Counter } = await python("./tools.py");
+
+    console.log(await greet("Mayowa"));      // Hello, Mayowa!
+    console.log(await multiply(4, 6));       // 24
+
+    const counter = await Counter(5);
+    console.log(await counter.add(3));       // 8
+
+    await counter.release();
     ```
   </Step>
+
   <Step title="Run it">
-    Show the first thing a user does to see it working.
+    Execute the script with Node.js directly — no extra flags needed when using the `python()` helper.
 
     ```bash
-    your-cli start
+    node index.js
+    ```
+
+    Expected output:
+
+    ```
+    Hello, Mayowa!
+    24
+    8
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  You do not need to call `shutdown()` in short scripts. esem-bridge automatically unrefs the Python worker when no calls are active, so Node.js exits naturally once your script finishes. In long-running applications the worker stays alive and is reused across all `python()` calls.
+</Note>
+
+---
+
+## Using the `python:` import syntax
+
+If you prefer static ESM `import` declarations, esem-bridge provides a Node.js loader hook that intercepts `python:` specifiers and synthesizes a live module proxy on the fly.
+
+<Steps>
+  <Step title="Write your JavaScript file using the import syntax">
+    Replace the `python()` call with a standard `import` statement using the `python:` prefix. Everything else — calling functions, instantiating classes, reading constants — works the same way.
+
+    ```js index.js
+    import tools from "python:./tools.py";
+
+    console.log(await tools.greet("Mayowa"));    // Hello, Mayowa!
+    console.log(await tools.multiply(4, 6));     // 24
+
+    const counter = await tools.Counter(5);
+    console.log(await counter.add(3));           // 8
+    ```
+  </Step>
+
+  <Step title="Run with the loader hook">
+    The `python:` syntax requires the esem-bridge loader to be active. Use either the `esem` CLI or the `--experimental-loader` flag directly.
+
+    <CodeGroup>
+      ```bash esem CLI (recommended)
+      npx esem run index.js
+      ```
+
+      ```bash node --experimental-loader
+      node --experimental-loader esem-bridge/loader index.js
+      ```
+    </CodeGroup>
+
+    To run the CLI without installing the package first, use `npx` with the `--package` flag:
+
+    ```bash
+    npx --package esem-bridge esem run index.js
     ```
   </Step>
 </Steps>
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+  To use a specific Python binary — such as one inside a virtual environment — set the `ESEM_PYTHON` environment variable before running your script:
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  ```bash
+  ESEM_PYTHON=.venv/bin/python npx esem run index.js
+  ```
+
+  This is useful when your Python module depends on packages installed in a project-local `.venv`.
 </Tip>

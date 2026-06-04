@@ -1,0 +1,116 @@
+---
+title: "Environment Variables and Configuration for esem-bridge"
+sidebarTitle: "Environment"
+description: "Configure esem-bridge with environment variables. Use ESEM_PYTHON to select a Python interpreter, virtualenv, or conda environment."
+---
+
+esem-bridge is zero-configuration by default — it finds `python3` on your system `PATH` and uses it automatically. For projects that require a specific interpreter, a virtualenv, or a conda environment, a single environment variable lets you point the bridge at exactly the Python binary you need.
+
+## Supported environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `ESEM_PYTHON` | `python3` | Path or name of the Python interpreter used to spawn the worker process |
+
+## Usage scenarios
+
+Each scenario below shows how to set `ESEM_PYTHON` to match your project's Python setup. Only the relevant scenario applies — no other configuration is required alongside it.
+
+### Default — system Python 3
+
+When `ESEM_PYTHON` is not set, esem-bridge spawns `python3` from your system `PATH`. No configuration is needed.
+
+```js
+// No environment variable required.
+import { python } from "esem-bridge";
+
+const { add } = await python("./tools.py");
+console.log(await add(2, 3)); // 5
+```
+
+### Virtualenv
+
+Point `ESEM_PYTHON` at the interpreter inside your virtual environment so the worker has access to all packages installed there.
+
+```bash
+ESEM_PYTHON=.venv/bin/python node index.js
+```
+
+### Conda environment
+
+Use the full path to the conda environment's interpreter.
+
+```bash
+ESEM_PYTHON=/opt/conda/envs/myenv/bin/python node index.js
+```
+
+### Specific Python version
+
+If multiple Python versions are installed and available on `PATH`, use a version-qualified binary name.
+
+```bash
+ESEM_PYTHON=python3.11 node index.js
+```
+
+### With the esem CLI
+
+`ESEM_PYTHON` works the same way when running through the `esem` CLI, which enables the `python:` import syntax.
+
+```bash
+ESEM_PYTHON=.venv/bin/python npx esem run index.js
+```
+
+## Setting ESEM_PYTHON persistently
+
+Prefixing every command with the variable quickly becomes tedious. Two common approaches keep it consistent without repetition.
+
+### Shell profile
+
+Export the variable in your shell's profile file (e.g. `~/.bashrc`, `~/.zshrc`, or `~/.profile`) so it is available in every terminal session.
+
+```bash
+# ~/.zshrc or ~/.bashrc
+export ESEM_PYTHON=.venv/bin/python
+```
+
+After saving, reload the shell or run `source ~/.zshrc` for the change to take effect.
+
+### .env file
+
+For project-level configuration, store the variable in a `.env` file at the project root and load it with a dotenv-compatible library before your script runs.
+
+```bash
+# .env
+ESEM_PYTHON=.venv/bin/python
+```
+
+```js
+// Load .env before importing esem-bridge
+import "dotenv/config";
+import { python } from "esem-bridge";
+
+const { add } = await python("./tools.py");
+```
+
+<Tip>
+  Using a `.env` file with a dotenv-compatible loader (such as the `dotenv` npm
+  package) is the recommended approach for team projects. Committing `.env.example`
+  with a documented `ESEM_PYTHON` value keeps the interpreter path consistent
+  across every developer's machine without hardcoding paths in source files.
+</Tip>
+
+## Where the variable is read
+
+`ESEM_PYTHON` is read once, at the moment the Python worker is first spawned. This happens inside `ensureWorker()`, which is called automatically on the first `python()` invocation. The relevant line in `bridge.js` is:
+
+```js
+const pythonBin = process.env.ESEM_PYTHON || "python3";
+```
+
+<Note>
+  Because `ESEM_PYTHON` is read when `ensureWorker()` is called — that is, on
+  the first `python()` call — you can set the variable at any point before that
+  call, including programmatically via `process.env.ESEM_PYTHON = "..."` early
+  in your script. Changes made after the worker has already started have no
+  effect on the running worker.
+</Note>

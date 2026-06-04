@@ -1,0 +1,243 @@
+---
+title: "How esem-bridge Works Under the Hood"
+sidebarTitle: "How It Works"
+description: "esem-bridge spawns a Python worker subprocess and communicates via newline-delimited JSON-RPC over stdin/stdout. No network, no servers."
+---
+
+esem-bridge is composed of four thin layers: a bridge runtime that owns the subprocess, a Python worker that executes your code, a proxy system that wraps Python values as natural JavaScript objects, and an ESM loader hook that makes `python:` import specifiers work. Each layer has a single, well-defined responsibility. Together they let a `await tools.add(2, 3)` call in JavaScript reach a Python function and return its result with no network stack involved.
+
+## Architecture overview
+
+The full call path from a JavaScript `await` to a Python return value looks like this:
+
+```
+JS runtime
+  → python() call
+  → bridge spawns Python worker (once)
+  → JSON-RPC over stdin/stdout
+  → Python loads module, runs function
+  → result serialized back to JS
+  → await resolves
+```
+
+The worker is spawned exactly once. Every subsequent call reuses the same process, so there is no per-call startup cost. Python object instances live in the worker's memory; JavaScript holds only a lightweight reference ID.
+
+---
+
+## Layer-by-layer breakdown
+
+### bridge.js — subprocess manager and RPC transport
+
+`bridge.js` is the runtime core. It spawns the Python worker, routes responses back to their callers, and implements the `rpc()` function that every other module uses to communicate with Python.
+
+**Spawning the worker.** `ensureWorker()` is called before any RPC. If no worker is running it spawns `python3 worker.py` (or the binary named by `ESEM_PYTHON`) with `stdio: ["pipe", "pipe", "pipe"]` so all three streams are controlled by Node.js. The worker's current working directory is set to `process.cwd()` so relative module paths resolve correctly from the caller's project.
+
+```js
+export function ensureWorker() {
+  if (workerProcess) return readyPromise;
+
+  const pythonBin = process.env.ESEM_PYTHON || "python3";
+
+  const childProcess = spawn(pythonBin, [WORKER_PATH], {
+    stdio: ["pipe", "pipe", "pipe"],
+    // Pass the calling project's cwd so relative imports resolve correctly
+    cwd: process.cwd(),
+  });
+  workerProcess = childProcess;
+  // ...
+}
+```
+
+**The `ready` handshake.** The worker writes `{"type": "ready"}` to stdout as soon as it starts. `bridge.js` watches for this line and resolves `readyPromise`, unblocking any callers that were waiting.
+
+**Pending requests map.** Every in-flight call is tracked in `pendingRequests`, a `Map` from numeric request ID to `{ resolve, reject }`. When a response line arrives, the bridge looks up the ID and settles the corresponding promise.
+
+**`rpc()` — the single send/receive primitive.** Every proxy call ultimately goes through `rpc()`. It assigns an incremented ID, writes a JSON line to stdin, and returns a promise that the response handler will resolve.
+
+```js
+export async function rpc(action, payload = {}) {
+  await ensureWorker();
+
+  const id = ++requestCounter;
+
+  return new Promise((resolve, reject) => {
+    const childProcess = workerProcess;
+    pendingRequests.set(id, { resolve, reject });
+    const message = JSON.stringify({ id, action, ...payload }) + "\n";
+    setWorkerReferenced(childProcess, true);
+    childProcess.stdin.write(message);
+  });
+}
+```
+
+---
+
+### worker.py — persistent Python execution engine
+
+`worker.py` runs as a long-lived subprocess. It reads newline-delimited JSON from stdin, dispatches each message to the appropriate handler, and writes a JSON result or error back to stdout.
+
+**The main loop.** After signalling `ready`, the worker iterates over `sys.stdin` line by line. Each line is parsed as JSON and dispatched through the `HANDLERS` dictionary:
+
+```python
+HANDLERS = {
+    "load":        handle_load,
+    "call":        handle_call,
+    "construct":   handle_construct,
+    "method_call": handle_method_call,
+    "release":     handle_release,
+    "get_attr":    handle_get_attr,
+}
+```
+
+**Action handlers.** Each handler corresponds to one type of JavaScript operation:
+
+| Action | What it does |
+|---|---|
+| `load` | Imports a module (by file path or package name) and returns metadata about its public exports |
+| `call` | Calls a top-level function in a loaded module with deserialized arguments |
+| `construct` | Instantiates a class, registers the instance in `_object_registry`, returns a `ref_id` and method list |
+| `method_call` | Calls a method on a registered object instance |
+| `get_attr` | Reads a plain attribute or constant from a module or registered object |
+| `release` | Removes an object from `_object_registry`, allowing it to be garbage-collected |
+
+**Object registry.** Python class instances cannot be serialized across the process boundary. Instead, `worker.py` stores them in an in-process dictionary keyed by a string ID (`py_obj_1`, `py_obj_2`, …). JavaScript receives only the ID and uses it in subsequent `method_call` and `release` messages.
+
+```python
+_object_registry = {}
+_object_counter = 0
+
+def _register_object(obj):
+    global _object_counter
+    _object_counter += 1
+    ref_id = f"py_obj_{_object_counter}"
+    _object_registry[ref_id] = obj
+    return ref_id
+```
+
+**Error propagation.** Any unhandled exception is caught at the top of the main loop and written back with `type: "error"`, including the exception message, its type name, and the full traceback string.
+
+---
+
+### proxy.js — JavaScript wrappers for Python values
+
+`proxy.js` turns raw RPC responses into objects that feel native to JavaScript callers.
+
+**`createModuleProxy(moduleSpec)`** sends a `load` action, receives the module's export map, and builds a plain JavaScript object. Functions get `createFunctionProxy`, classes get `createClassProxy`, and plain values are exposed as lazy async getters that fire a `get_attr` request on first access.
+
+**`createFunctionProxy(moduleSpec, funcName)`** returns an async function that serializes its arguments, calls `rpc("call", ...)`, and deserializes the response.
+
+**`createClassProxy(moduleSpec, className)`** returns an async factory. Calling it (with or without `new`) sends a `construct` RPC, receives a `ref_id` and method list, and returns a `createObjectProxy`.
+
+**`createObjectProxy(refId, methods)`** wraps a live Python object. Known methods are attached directly. A JavaScript `Proxy` trap handles any unknown property access — meaning methods not listed in the initial `construct` response are still callable via a dynamic `method_call` round-trip. The `then`/`catch`/`finally` properties are explicitly blocked so JavaScript does not mistake the proxy for a Promise.
+
+```js
+return new Proxy(proxy, {
+  get(target, prop) {
+    if (prop in target) return target[prop];
+    // Block .then so JS doesn't treat this as a thenable/Promise
+    if (prop === "then" || prop === "catch" || prop === "finally") return undefined;
+    // Unknown method — create it dynamically
+    if (typeof prop === "string" && !prop.startsWith("_")) {
+      return async (...args) => {
+        const serializedArgs = args.map(serialize);
+        const response = await rpc("method_call", {
+          ref_id: refId,
+          method: prop,
+          args: serializedArgs,
+        });
+        return deserialize(response.result);
+      };
+    }
+    return undefined;
+  },
+});
+```
+
+**Type serialization.** Every value crossing the bridge is wrapped in a typed envelope. The `serialize` function on the JS side and `_serialize` on the Python side both produce structures like `{"type": "int", "value": 5}`. The full mapping:
+
+| Python | Wire type | JavaScript |
+|---|---|---|
+| `None` | `null` | `null` |
+| `bool` | `bool` | `boolean` |
+| `int` | `int` | `number` |
+| `float` | `float` | `number` |
+| `str` | `str` | `string` |
+| `list` / `tuple` | `list` | `Array` |
+| `dict` | `dict` | `object` |
+| class instance | `proxy` | proxy object |
+
+---
+
+### loader.js — ESM loader hook for `python:` specifiers
+
+`loader.js` is a Node.js ESM loader hook registered with `--experimental-loader esem-bridge/loader`. It intercepts two ESM lifecycle callbacks.
+
+**`resolve`** checks whether the specifier starts with `python:`. If it does, it strips the prefix and returns a synthetic `esem://` URL, bypassing the normal filesystem resolution entirely.
+
+**`load`** intercepts any URL that starts with `esem://`, decodes the module specifier, and synthesizes a complete ES module source string on the fly:
+
+```js
+export function load(url, context, nextLoad) {
+  if (!url.startsWith("esem://")) {
+    return nextLoad(url, context);
+  }
+
+  const moduleSpec = decodeURIComponent(url.slice("esem://".length));
+
+  const source = `
+import { ensureWorker } from ${JSON.stringify(BRIDGE_URL)};
+import { createModuleProxy } from ${JSON.stringify(PROXY_URL)};
+
+await ensureWorker();
+const __mod = await createModuleProxy(${JSON.stringify(moduleSpec)});
+
+export default __mod;
+export { __mod as mod };
+`;
+
+  return {
+    shortCircuit: true,
+    format: "module",
+    source,
+  };
+}
+```
+
+The synthesized module exports the proxy as both the default export and a named `mod` export, so both `import tools from "python:./tools.py"` and `import { mod } from "python:./tools.py"` work.
+
+---
+
+## JSON-RPC wire format
+
+All messages are single-line JSON terminated by `\n`. Requests flow from Node.js to the worker's stdin; responses flow from the worker's stdout to Node.js.
+
+A `call` request and its response look like this:
+
+```json
+// request — Node.js → Python stdin
+{"id": 1, "action": "call", "module": "./tools.py", "function": "add", "args": [{"type": "int", "value": 2}, {"type": "int", "value": 3}]}
+```
+
+```json
+// response — Python stdout → Node.js
+{"type": "result", "id": 1, "result": {"type": "int", "value": 5}}
+```
+
+If Python raises an exception, the response carries the error details instead:
+
+```json
+// error response
+{"type": "error", "id": 1, "error": "Input cannot be empty", "traceback": "Traceback (most recent call last):\n  ...\nValueError: Input cannot be empty\n", "error_type": "ValueError"}
+```
+
+The `id` field is an auto-incrementing integer assigned by `bridge.js`. It ties each response back to the correct pending promise in the `pendingRequests` Map.
+
+---
+
+## Worker lifecycle
+
+<Note>
+  The Python worker is spawned once — on the first `python()` or `rpc()` call — and then shared across every subsequent call for the entire lifetime of the Node.js process. After the `ready` handshake, the worker's process and stdio streams are unreffed via Node's `childProcess.unref()` and `stream.unref()`. This means the worker does not keep the Node.js event loop alive when no calls are in flight, so short scripts exit naturally without an explicit `shutdown()` call.
+
+  When a new RPC call is made, the worker and its streams are rerefed for the duration of that call, then unreffed again once the pending requests map is empty. On Node.js `exit`, `SIGINT`, and `SIGTERM`, `bridge.js` calls `shutdown()`, which closes the worker's stdin, causing the worker's `for line in sys.stdin` loop to terminate cleanly.
+</Note>

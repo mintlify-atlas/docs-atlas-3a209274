@@ -1,0 +1,94 @@
+---
+title: "esem CLI — Run JavaScript Files with Python Import Support"
+sidebarTitle: "CLI"
+description: "The esem command-line tool runs Node.js scripts with the python: import loader enabled. Use esem run <file.js> instead of node <file.js>."
+---
+
+The `esem` CLI is a thin wrapper around `node` that automatically injects the `--experimental-loader esem-bridge/loader` flag before your script. This means any JavaScript file that uses `python:` import syntax runs without any manual Node.js flag configuration — you replace `node index.js` with `esem run index.js` and the bridge is ready.
+
+## Installation
+
+The `esem` binary is registered automatically when you install the package. For project-local use, run via `npx esem`. For one-off use without installing first, use `npx --package`.
+
+<CodeGroup>
+```bash Local or global install
+# After npm install -g esem-bridge or a local install
+esem run index.js
+
+# Using npx (resolves from node_modules)
+npx esem run index.js
+
+# One-off — no prior install required
+npx --package esem-bridge esem run index.js
+```
+</CodeGroup>
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `esem run <file.js>` | Run a JS file with `python:` import support |
+| `esem node <file.js>` | Alias for `run` |
+| `esem --version`, `-v` | Print the version number |
+| `esem --help`, `-h` | Print help text |
+
+Any positional arguments after `<file.js>` are forwarded to the child Node.js process unchanged.
+
+## Environment Variables
+
+<ParamField query="ESEM_PYTHON" type="string" default="python3">
+  Path to the Python executable the bridge should use. Set this to point at a
+  virtual environment binary so the worker has access to your project's
+  installed packages.
+</ParamField>
+
+```bash
+ESEM_PYTHON=.venv/bin/python npx esem run index.js
+```
+
+## How It Works Internally
+
+When you run `esem run index.js`, the CLI resolves the absolute path to `loader.js` inside the `esem-bridge` package directory and spawns a new Node.js child process like this:
+
+```js
+// Simplified from cli.js
+const nodeArgs = [
+  `--experimental-loader=${LOADER_PATH}`,
+  scriptFile,
+  ...extraArgs,
+];
+
+const child = spawn(process.execPath, nodeArgs, {
+  stdio: "inherit",
+  env: process.env,
+  cwd: process.cwd(),
+});
+```
+
+`stdio: "inherit"` means all output from your script (including the Python worker's stderr) flows directly to your terminal. The CLI exits with whatever exit code the child Node.js process produces.
+
+## Full Example
+
+```python
+# tools.py
+def add(a, b):
+    return a + b
+```
+
+```js
+// index.js
+import tools from "python:./tools.py";
+console.log(await tools.add(2, 3)); // 5
+```
+
+```bash
+esem run index.js
+# 5
+```
+
+<Note>
+  Node.js prints an `ExperimentalWarning` about `--experimental-loader` when
+  the loader hook is active. This message is expected and does not affect the
+  functionality of your script. You can suppress it by setting the
+  `NODE_NO_WARNINGS=1` environment variable if it clutters your output.
+</Note>

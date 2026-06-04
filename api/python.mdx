@@ -1,0 +1,85 @@
+---
+title: "python() — Load a Python Module as a JavaScript Proxy"
+sidebarTitle: "python()"
+description: "Async function that loads a Python module by file path or package name and returns a proxy object with every export callable as an async JS function."
+---
+
+`python()` is the primary entry point for esem-bridge. It loads a Python module — by file path or pip package name — and returns a JavaScript proxy whose properties mirror the module's exports. Functions become async callables, classes become async constructors that return instance proxies, and plain values become awaitable properties.
+
+## Signature
+
+```ts
+python(moduleSpec: string): Promise<object>
+```
+
+## Parameters
+
+<ParamField path="moduleSpec" type="string" required>
+  The module to load. Accepted forms:
+
+  - **Relative file path** — e.g. `"./tools.py"`. Resolved from the current working directory.
+  - **Absolute file path** — e.g. `"/home/user/scripts/tools.py"`.
+  - **Pip package name** — e.g. `"numpy"`. Any string that does not start with `./` or `/` and does not end in `.py` is passed directly to `importlib.import_module()`.
+</ParamField>
+
+## Returns
+
+A `Promise` that resolves to a proxy object representing the loaded Python module. The proxy maps each exported name to one of the following:
+
+- **Functions** — become async JS functions. Call them with the same positional arguments you would use in Python; return values are deserialized back to native JS types.
+- **Classes** — become async factory functions. Calling (or `new`-ing) them constructs a Python instance and returns an instance proxy whose methods are also async.
+- **Plain values** (constants, dicts, lists, etc.) — exposed as `async` getter properties. `await` them to retrieve the current value from Python.
+
+## Examples
+
+### Import styles
+
+<CodeGroup>
+
+```js File path
+const tools = await python("./tools.py");
+```
+
+```js Pip package
+const np = await python("numpy");
+```
+
+```js Destructuring
+const { add, greet } = await python("./tools.py");
+```
+
+</CodeGroup>
+
+### Calling a function
+
+```js
+const { add } = await python("./tools.py");
+const result = await add(2, 3); // 5
+```
+
+### Instantiating a class
+
+```js
+const { Calculator } = await python("./calculator.py");
+const calc = await Calculator(2);
+const result = await calc.add(1.234, 2.345);
+```
+
+`Calculator(2)` constructs a Python `Calculator` instance with `precision=2`. The returned `calc` object is an instance proxy — calling `calc.add(...)` routes the method call back to the live Python object.
+
+### Reading a constant
+
+```js
+const config = await python("./config.py");
+const version = await config.VERSION;
+```
+
+Module-level values are fetched lazily from Python on each `await`. Destructured values work the same way — they are awaitable properties, not plain strings or numbers.
+
+<Note>
+  The Python worker is spawned lazily on the very first `python()` call and then reused for every subsequent call in the same process. There is no per-call startup cost after the first invocation. See [`ensureWorker()`](/api/ensure-worker) if you want to pre-warm the worker before the first `python()` call.
+</Note>
+
+<Note>
+  If the module cannot be loaded — for example because the file does not exist or the package is not installed — the returned `Promise` rejects with a [`PythonError`](/api/python-error). Wrap the call in `try/catch` or `.catch()` to handle this case.
+</Note>

@@ -1,0 +1,206 @@
+---
+title: "Python Worker Lifecycle and Shutdown Behaviour"
+sidebarTitle: "Worker Lifecycle"
+description: "esem-bridge spawns one Python worker per Node process, keeps it alive between calls, and shuts it down automatically when Node exits."
+---
+
+esem-bridge manages a single Python subprocess for the lifetime of your Node.js process. The worker is spawned lazily on the first `python()` call and is then shared by every subsequent call in that process — there is no per-call startup cost after the first invocation. When no Python calls are active, the worker is automatically unreferenced so it does not prevent Node.js from exiting on its own.
+
+## Lifecycle stages
+
+<Steps>
+  <Step title="First python() call triggers worker startup">
+    The first time `python()` is called, `ensureWorker()` reads `ESEM_PYTHON`
+    (defaulting to `python3`) and spawns `worker.py` as a child process with
+    stdio piped:
+
+    ```js
+    const pythonBin = process.env.ESEM_PYTHON || "python3";
+
+    const childProcess = spawn(pythonBin, [WORKER_PATH], {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd: process.cwd(),
+    });
+    ```
+
+    Subsequent `python()` calls skip this step and reuse the already-running
+    worker.
+  </Step>
+
+  <Step title="Worker signals readiness">
+    Once the Python process has initialised, `worker.py` writes a single
+    JSON message to stdout:
+
+    ```json
+    {"type": "ready"}
+    ```
+
+    The bridge receives this line, resolves the internal `readyPromise`, and
+    allows the first RPC request to be sent. Until this message arrives, all
+    `python()` calls await the promise.
+  </Step>
+
+  <Step title="RPC calls are dispatched over stdin/stdout">
+    Every `python()` call that follows sends a newline-delimited JSON-RPC
+    message to the worker's stdin and waits for a matching response on stdout.
+    All calls share the same worker — there is no process-per-call overhead.
+
+    ```js
+    import { python } from "esem-bridge";
+
+    // Both calls go to the same running worker process.
+    const { add } = await python("./tools.py");
+    const { greet } = await python("./tools.py");
+
+    console.log(await add(2, 3));       // 5
+    console.log(await greet("Crane")); // "Hello, Crane!"
+    ```
+  </Step>
+
+  <Step title="Worker is unreferenced when idle">
+    After each RPC response is received, the bridge checks whether there are
+    any remaining pending requests. If the queue is empty, the worker process
+    and all its stdio streams are unreferenced with `unref()`:
+
+    ```js
+    function unrefWorkerIfIdle(childProcess) {
+      if (pendingRequests.size === 0 && workerProcess === childProcess) {
+        setWorkerReferenced(childProcess, false);
+      }
+    }
+    ```
+
+    An unreferenced process does not keep the Node.js event loop alive, so
+    short scripts exit naturally once all awaited calls complete — no explicit
+    shutdown call is needed.
+  </Step>
+
+  <Step title="Shutdown closes the worker cleanly">
+    When Node.js exits, or when `shutdown()` is called explicitly, the bridge
+    closes the worker's stdin. `worker.py` reads from stdin in a loop; a
+    closed stdin causes the loop to end and the Python process exits cleanly.
+
+    Signal handlers registered in `bridge.js` ensure this happens automatically
+    for `exit`, `SIGINT`, and `SIGTERM`:
+
+    ```js
+    process.on("exit", shutdown);
+    process.on("SIGINT", () => { shutdown(); process.exit(0); });
+    process.on("SIGTERM", () => { shutdown(); process.exit(0); });
+    ```
+  </Step>
+</Steps>
+
+## Auto-shutdown for short scripts
+
+For short-lived scripts you do not need to do anything. Once all `python()` calls resolve and there are no more pending requests, the worker is unreferenced and Node.js exits on its own.
+
+```js
+import { python } from "esem-bridge";
+
+const { add } = await python("./tools.py");
+console.log(await add(2, 3)); // script exits automatically after this
+```
+
+## Explicit shutdown for long-running applications
+
+In a long-running server or daemon, the worker stays alive and referenced whenever a Python call is in flight. If you know Python will not be needed again, you can release the worker early:
+
+```js
+import { shutdown } from "esem-bridge";
+
+// After your last Python call:
+shutdown();
+```
+
+### What shutdown() does
+
+`shutdown()` performs the following steps in order:
+
+1. **Closes the worker's stdin** — `worker.py` detects end-of-file on `sys.stdin` and exits.
+2. **Clears the pending request map** — any registered `{ resolve, reject }` callbacks are discarded.
+3. **Resets the ready state** — `isReady` is set to `false` and `readyPromise` is replaced with a fresh promise, so a new worker can be spawned transparently if `python()` is called again later.
+
+<Warning>
+  Do not call Python functions immediately after `shutdown()` if there were
+  in-flight calls at the time. `shutdown()` discards all pending request
+  callbacks without rejecting them, meaning those Promises will never settle.
+  A new worker will be spawned on the next `python()` call, but results from
+  calls made before `shutdown()` are permanently lost. Always await all
+  outstanding calls before shutting down.
+</Warning>
+
+## Worker crash recovery
+
+If the Python worker exits unexpectedly with a non-zero exit code, the bridge handles the failure gracefully:
+
+- All pending Promises are **rejected** with `Error("Python worker exited unexpectedly")`.
+- `workerProcess` is set to `null` and `isReady` is reset to `false`.
+- The next `python()` call will trigger `ensureWorker()` again, spawning a fresh worker automatically.
+
+The relevant exit handler in `bridge.js`:
+
+```js
+childProcess.on("exit", (code) => {
+  if (workerProcess !== childProcess) return;
+
+  if (code !== 0 && code !== null) {
+    console.error(`[esem] Python worker exited with code ${code}`);
+  }
+  workerProcess = null;
+  isReady = false;
+  for (const [, pending] of pendingRequests) {
+    pending.reject(new Error("Python worker exited unexpectedly"));
+  }
+  pendingRequests.clear();
+});
+```
+
+<Note>
+  A previous worker finishing after a new one has already started is handled
+  safely. The exit handler compares `workerProcess` against the reference it
+  captured at spawn time, so a stale exit event cannot corrupt the state of a
+  newly started worker.
+</Note>
+
+## Signal handling
+
+`bridge.js` registers three process-level signal handlers to guarantee the Python subprocess is always cleaned up:
+
+| Signal | Behaviour |
+|---|---|
+| `exit` | Calls `shutdown()` synchronously before the Node process terminates |
+| `SIGINT` | Calls `shutdown()`, then `process.exit(0)` (handles Ctrl-C in terminal) |
+| `SIGTERM` | Calls `shutdown()`, then `process.exit(0)` (handles container/system stop) |
+
+These handlers mean you do not need to add your own cleanup code for the common cases. For applications that need graceful shutdown of other resources (e.g. an HTTP server), you can combine your own handler with the exported `shutdown()` function.
+
+## Long-running server pattern
+
+The following example shows how to integrate esem-bridge into an HTTP server that starts a Python model once and serves predictions for as long as the server is running, then shuts everything down cleanly on `SIGTERM`.
+
+```js
+import { python, shutdown } from "esem-bridge";
+import http from "http";
+
+const { predict } = await python("./model.py");
+
+const server = http.createServer(async (req, res) => {
+  const result = await predict({ /* ... */ });
+  res.end(JSON.stringify(result));
+});
+
+server.listen(3000);
+
+process.on("SIGTERM", () => {
+  server.close();
+  shutdown();
+});
+```
+
+<Info>
+  The `python()` call at the top level of the module runs once when the server
+  starts. Because `predict` is a proxied function, each request invokes it
+  directly without reloading the module — the Python model stays in memory for
+  the lifetime of the server.
+</Info>
